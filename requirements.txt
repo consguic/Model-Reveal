@@ -1,5 +1,9 @@
 streamlit
-scikit-learn
 pandas
-shap
+numpy
+scikit-learn
 matplotlib
+shap
+joblib
+xgboost
+lime   
