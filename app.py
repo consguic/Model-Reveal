@@ -1,119 +1,73 @@
-# app.py
 import streamlit as st
 import pandas as pd
+import numpy as np
 import shap
 import matplotlib.pyplot as plt
-import joblib
-from sklearn.datasets import load_iris
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, IsolationForest
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
 
-# -------------------------------
-# 🌿 Sayfa Ayarları ve Stil
-# -------------------------------
-st.set_page_config(page_title="GlassBox AI Dashboard", layout="wide")
+st.set_page_config(page_title="Model Reveal", layout="wide")
 
-st.markdown("""
-<style>
-.stApp {
-    background-color: #f0f2f6;
-    font-family: 'Arial', sans-serif;
-}
-</style>
-""", unsafe_allow_html=True)
+# --- Güvenli rerun fonksiyonu ---
+def safe_rerun():
+    try:
+        st.experimental_rerun()
+    except:
+        pass
 
-st.title("🌿 GlassBox – AI Explainability Dashboard")
-st.write("Şeffaf yapay zekâ deneyimi: Modelinizin kararlarını keşfedin!")
+# --- SHAP grafiği ---
+def plot_shap_waterfall(explainer, shap_values, input_df, prediction_label):
+    base_value = getattr(explainer, "expected_value", 0)
+    shap_values_plot = shap_values.values[0] if hasattr(shap_values, "values") else shap_values[0]
+    data = input_df.iloc[0].values
+    
+    exp = shap.Explanation(
+        values=shap_values_plot,
+        base_values=base_value,
+        data=data,
+        feature_names=input_df.columns
+    )
+    shap.plots.waterfall(exp, show=False)
+    fig = plt.gcf()
+    st.pyplot(fig)
+    plt.close(fig)
 
-# -------------------------------
-# 🌟 Model Seçimi / Yükleme
-# -------------------------------
-st.sidebar.header("Model Seçimi")
+# --- Basit state ---
+if 'stage' not in st.session_state:
+    st.session_state.stage = 'upload_train'
 
-mode = st.sidebar.radio("Mod Seçin:", ("Demo Model (Iris)", "Kendi Modelini Yükle"))
+st.title("💡 Model Reveal: Explainable Anomaly Dashboard")
 
-if mode == "Demo Model (Iris)":
-    iris = load_iris()
-    X = pd.DataFrame(iris.data, columns=iris.feature_names)
-    y = iris.target
-    model = RandomForestClassifier(random_state=42).fit(X, y)
-    st.sidebar.success("Demo modeli yüklendi!")
-else:
-    uploaded_file = st.sidebar.file_uploader("Bir model (.pkl) dosyası yükle", type=["pkl"])
-    if uploaded_file is not None:
-        model = joblib.load(uploaded_file)
-        # Özellik isimleri otomatik algılama
-        if hasattr(model, 'feature_names_in_'):
-            X_columns = model.feature_names_in_
-        else:
-            st.warning("Modelin feature isimleri yok. Demo Iris kullanılıyor.")
-            iris = load_iris()
-            X = pd.DataFrame(iris.data, columns=iris.feature_names)
-            y = iris.target
-            model = RandomForestClassifier(random_state=42).fit(X, y)
-            X_columns = X.columns
-        st.sidebar.success("Model başarıyla yüklendi!")
+if st.session_state.stage == 'upload_train':
+    uploaded = st.file_uploader("Eğitim verisini yükle (.csv)", type='csv')
+    if uploaded:
+        df = pd.read_csv(uploaded)
+        st.session_state.df = df
+        st.success("Veri yüklendi!")
+        st.dataframe(df.head())
+        if st.button("Isolation Forest ile eğit"):
+            X = pd.get_dummies(df, drop_first=True)
+            model = IsolationForest(random_state=42)
+            model.fit(X)
+            st.session_state.model = model
+            st.session_state.X_train = X
+            st.session_state.stage = 'upload_test'
+            safe_rerun()
 
-# -------------------------------
-# 📝 Kullanıcı Girdisi
-# -------------------------------
-st.sidebar.header("Yeni Tahmin için Veri Girin")
-
-input_data = {}
-if mode == "Demo Model (Iris)" or uploaded_file is not None:
-    # Kolon isimleri
-    columns = X.columns if mode=="Demo Model (Iris)" else X_columns
-    for col in columns:
-        min_val = float(X[col].min()) if mode=="Demo Model (Iris)" else 0.0
-        max_val = float(X[col].max()) if mode=="Demo Model (Iris)" else 10.0
-        step = (max_val - min_val)/100
-        input_data[col] = st.sidebar.number_input(col, min_value=min_val, max_value=max_val, value=(min_val+max_val)/2, step=step)
-    input_df = pd.DataFrame([input_data])
-
-    # -------------------------------
-    # 🔮 Tahmin
-    # -------------------------------
-    prediction = model.predict(input_df)[0]
-    proba = model.predict_proba(input_df)[0] if hasattr(model, 'predict_proba') else None
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.subheader("🔮 Tahmin Sonucu")
-        if mode=="Demo Model (Iris)":
-            st.metric(label="Tahmin", value=iris.target_names[prediction])
-            if proba is not None:
-                st.metric(label="Confidence", value=f"{max(proba)*100:.2f}%")
-        else:
-            st.metric(label="Tahmin", value=str(prediction))
-            if proba is not None:
-                st.metric(label="Confidence", value=f"{max(proba)*100:.2f}%")
-
-    # -------------------------------
-    # 📊 SHAP Açıklaması
-    # -------------------------------
-    with col2:
-        st.subheader("📊 Özellik Etkileri (SHAP)")
-
-        # SHAP Explainer
-        try:
-            explainer = shap.TreeExplainer(model)
-            shap_values = explainer.shap_values(X) if mode=="Demo Model (Iris)" else explainer.shap_values(input_df)
-            # Summary plot
-            plt.figure(figsize=(6,4))
-            if mode=="Demo Model (Iris)":
-                shap.summary_plot(shap_values, X, show=False)
-            else:
-                shap.summary_plot(shap_values, input_df, show=False)
-            st.pyplot(plt.gcf())
-            plt.clf()
-        except Exception as e:
-            st.warning(f"SHAP açıklaması oluşturulamadı: {e}")
-
-else:
-    st.info("Lütfen sol taraftan model seçin veya yükleyin.")
-
-# -------------------------------
-# 🔹 Footer / Ek Bilgi
-# -------------------------------
-st.markdown("---")
-st.markdown("💡 GlassBox – AI Explainability Dashboard | Made with ❤️ by Fatma Kızılkaya")
+elif st.session_state.stage == 'upload_test':
+    st.header("Test verisini yükleyin (.csv)")
+    uploaded_test = st.file_uploader("Tek örnek içermeli", type='csv')
+    if uploaded_test:
+        test = pd.read_csv(uploaded_test)
+        test_X = pd.get_dummies(test, drop_first=True).reindex(columns=st.session_state.X_train.columns, fill_value=0)
+        model = st.session_state.model
+        pred = model.predict(test_X)[0]
+        score = model.decision_function(test_X)[0]
+        label = "Anomali" if pred == -1 else "Normal"
+        st.subheader(f"Tespit: **{label}** (skor: {score:.3f})")
+        
+        st.subheader("📊 SHAP Açıklaması")
+        explainer = shap.Explainer(model, st.session_state.X_train)
+        shap_values = explainer(test_X)
+        plot_shap_waterfall(explainer, shap_values, test_X, label)
