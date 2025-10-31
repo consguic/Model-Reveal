@@ -1,5 +1,6 @@
 import streamlit as st
 import shap
+import matplotlib.pyplot as plt
 import pandas as pd
 from sklearn.datasets import load_iris
 from sklearn.ensemble import RandomForestClassifier
@@ -29,6 +30,11 @@ st.write(f"### 🔮 Model Tahmini: **{iris.target_names[prediction]}**")
 explainer = shap.TreeExplainer(model)
 shap_values = explainer.shap_values(X)
 st.subheader("📊 Model Özellik Etkileri (SHAP)")
-st.set_option('deprecation.showPyplotGlobalUse', False)
+
+
+# SHAP summary plot
 shap.summary_plot(shap_values, X)
+
+st.pyplot(plt.gcf())  # plt.gcf() = current figure
+plt.clf()  # Sonraki plot için temizle
 st.pyplot(bbox_inches='tight')
