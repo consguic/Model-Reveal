@@ -1,10 +1,8 @@
 # app.py
 import streamlit as st
 import pandas as pd
-import numpy as np
 import shap
 import matplotlib.pyplot as plt
-from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier
@@ -12,6 +10,7 @@ from xgboost import XGBClassifier
 
 st.set_page_config(page_title="Model Reveal XAI", layout="wide")
 
+# --- Modern UI ---
 st.markdown("""
 <style>
 body {
@@ -40,11 +39,9 @@ st.markdown("Yüklediğiniz veri ile modeli eğitin ve SHAP ile karar mekanizmas
 
 # --- SESSION STATE ---
 for key in ["stage","model","X_train","y_train","le","feature_names",
-            "model_type","train_df","test_df","target_column"]:
+            "model_type","train_df","test_df","target_column","temp_target"]:
     if key not in st.session_state:
         st.session_state[key] = None
-if "temp_target" not in st.session_state:
-    st.session_state.temp_target = None
 
 MODEL_OPTIONS = {
     "Decision Tree": DecisionTreeClassifier,
