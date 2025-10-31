@@ -39,24 +39,12 @@ st.title("💡 Model Reveal: Explainable AI Dashboard")
 st.markdown("Yüklediğiniz veri ile modeli eğitin ve SHAP ile karar mekanizmasını görün.")
 
 # --- SESSION STATE ---
-if 'stage' not in st.session_state:
-    st.session_state.stage = 'upload_train'
-if 'model' not in st.session_state:
-    st.session_state.model = None
-if 'X_train' not in st.session_state:
-    st.session_state.X_train = None
-if 'y_train' not in st.session_state:
-    st.session_state.y_train = None
-if 'le' not in st.session_state:
-    st.session_state.le = None
-if 'feature_names' not in st.session_state:
-    st.session_state.feature_names = None
-if 'model_type' not in st.session_state:
-    st.session_state.model_type = None
-if 'train_df' not in st.session_state:
-    st.session_state.train_df = None
-if 'test_df' not in st.session_state:
-    st.session_state.test_df = None
+for key in ["stage","model","X_train","y_train","le","feature_names",
+            "model_type","train_df","test_df","target_column"]:
+    if key not in st.session_state:
+        st.session_state[key] = None
+if "temp_target" not in st.session_state:
+    st.session_state.temp_target = None
 
 MODEL_OPTIONS = {
     "Decision Tree": DecisionTreeClassifier,
@@ -70,8 +58,8 @@ def load_csv(uploaded_file):
     try:
         df = pd.read_csv(uploaded_file)
         return df
-    except Exception as e:
-        st.error(f"Veri yüklenirken hata: {e}")
+    except:
+        st.error("CSV yüklenirken hata oluştu")
         return None
 
 def preprocess(df, target_column):
@@ -86,9 +74,10 @@ def preprocess(df, target_column):
     return X, y
 
 def train_model(X, y, model_class):
-    model = model_class(random_state=42)
-    if model_class == RandomForestClassifier or model_class == XGBClassifier:
+    if model_class in [RandomForestClassifier, XGBClassifier]:
         model = model_class(random_state=42, n_estimators=100)
+    else:
+        model = model_class(random_state=42)
     model.fit(X, y)
     return model
 
@@ -108,50 +97,63 @@ def plot_shap_force(explainer, shap_values, X):
         shap_val = shap_values[0]
     shap.initjs()
     st.subheader("Force Plot (İlk Örnek)")
-    st_shap = st.pyplot
-    shap.force_plot(explainer.expected_value[0] if isinstance(explainer.expected_value, list) else explainer.expected_value,
-                    shap_val, X.iloc[0,:], matplotlib=True)
+    shap.force_plot(
+        explainer.expected_value[0] if isinstance(explainer.expected_value, list) else explainer.expected_value,
+        shap_val,
+        X.iloc[0,:],
+        matplotlib=True
+    )
+    st.pyplot(plt.gcf())
+    plt.close()
+
+# --- Callback fonksiyonları ---
+def select_target_callback():
+    st.session_state.target_column = st.session_state.temp_target
+    st.session_state.stage = 'select_model'
+
+def train_model_callback(model_name):
+    X, y = preprocess(st.session_state.train_df, st.session_state.target_column)
+    st.session_state.X_train = X
+    st.session_state.y_train = y
+    st.session_state.model = train_model(X, y, MODEL_OPTIONS[model_name])
+    st.session_state.model_type = model_name
+    st.session_state.stage = 'upload_test'
+
+def reset_app():
+    keys = ["stage","model","X_train","y_train","le","feature_names",
+            "model_type","train_df","test_df","target_column","temp_target"]
+    for key in keys:
+        st.session_state[key] = None
 
 # --- Aşamalar ---
-# 1️⃣ Eğitim Verisi Yükle
-if st.session_state.stage == 'upload_train':
+# 1️⃣ Eğitim CSV
+if st.session_state.stage in [None,'upload_train']:
     st.header("1️⃣ Eğitim Verisi Yükleyin (.csv)")
     uploaded_train_file = st.file_uploader("Eğitim CSV", type="csv")
     if uploaded_train_file is not None:
         df = load_csv(uploaded_train_file)
         if df is not None:
             st.session_state.train_df = df
+            st.session_state.temp_target = df.columns[0]
             st.success("Eğitim verisi yüklendi!")
             st.dataframe(df.head())
             st.session_state.stage = 'select_target'
-            st.experimental_rerun()
 
 # 2️⃣ Target seçimi
 if st.session_state.stage == 'select_target':
     st.header("2️⃣ Target Sütunu Seçin")
-    target_column = st.selectbox("Target Sütunu", st.session_state.train_df.columns)
-    if st.button("Onayla ve Model Seç"):
-        st.session_state.target_column = target_column
-        st.session_state.stage = 'select_model'
-        st.experimental_rerun()
+    st.selectbox("Target Sütunu", st.session_state.train_df.columns, key="temp_target")
+    st.button("Onayla ve Model Seç", on_click=select_target_callback)
 
-# 3️⃣ Model seçimi ve eğitimi
+# 3️⃣ Model seçimi
 if st.session_state.stage == 'select_model':
     st.header("3️⃣ Model Seçin ve Eğitin")
     col1, col2, col3 = st.columns(3)
     for idx, (name, cls) in enumerate(MODEL_OPTIONS.items()):
         with [col1, col2, col3][idx]:
-            if st.button(f"{name} Eğit"):
-                st.session_state.model_type = name
-                X, y = preprocess(st.session_state.train_df, st.session_state.target_column)
-                st.session_state.X_train = X
-                st.session_state.y_train = y
-                st.session_state.model = train_model(X, y, cls)
-                st.success(f"{name} başarıyla eğitildi!")
-                st.session_state.stage = 'upload_test'
-                st.experimental_rerun()
+            st.button(f"{name} Eğit", on_click=train_model_callback, args=(name,))
 
-# 4️⃣ Test verisi yükle ve tahmin
+# 4️⃣ Test verisi
 if st.session_state.stage == 'upload_test':
     st.header("4️⃣ Test Verisi Yükleyin (.csv)")
     uploaded_test_file = st.file_uploader("Test CSV", type="csv")
@@ -162,17 +164,12 @@ if st.session_state.stage == 'upload_test':
             st.success("Test verisi yüklendi!")
             st.dataframe(df_test.head())
             st.session_state.stage = 'show_shap'
-            st.experimental_rerun()
 
-# 5️⃣ SHAP Analizi ve Tahmin
+# 5️⃣ SHAP Analizi
 if st.session_state.stage == 'show_shap':
     st.header("5️⃣ SHAP Analizi ve Tahmin")
     X_test = st.session_state.test_df.drop(columns=[st.session_state.target_column], errors='ignore')
-    y_test = st.session_state.test_df[st.session_state.target_column] if st.session_state.target_column in st.session_state.test_df else None
     model = st.session_state.model
     explainer, shap_values = plot_shap_summary(model, X_test)
     plot_shap_force(explainer, shap_values, X_test)
-
-    if st.button("Yeni Analiz Başlat"):
-        st.session_state.clear()
-        st.experimental_rerun()
+    st.button("Yeni Analiz Başlat", on_click=reset_app)
