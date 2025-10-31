@@ -4,54 +4,113 @@ import numpy as np
 import shap
 import matplotlib.pyplot as plt
 from sklearn.ensemble import RandomForestClassifier, IsolationForest
-from sklearn.linear_model import LogisticRegression
-from sklearn.svm import OneClassSVM
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder, StandardScaler
-import joblib # Modelleri kaydetmek/yüklemek için kullanılabilir (şimdilik demo amaçlı eğitiyoruz)
+from sklearn.preprocessing import LabelEncoder
+import joblib
 
-# --- Sabitler ve Model Tanımları ---
+# Streamlit session state'i başlat
+if 'stage' not in st.session_state:
+    st.session_state.stage = 'upload_train'
+if 'model' not in st.session_state:
+    st.session_state.model = None
+if 'X_train' not in st.session_state:
+    st.session_state.X_train = None
+if 'y_train' not in st.session_state:
+    st.session_state.y_train = None
+if 'le' not in st.session_state: # Label Encoder (Target için)
+    st.session_state.le = None
+if 'feature_names' not in st.session_state:
+    st.session_state.feature_names = None
+if 'model_type' not in st.session_state:
+    st.session_state.model_type = None
 
-# Desteklenen Modeller
-MODEL_CHOICES = {
+
+# --- Sabitler ve Yardımcı Fonksiyonlar ---
+
+MODEL_OPTIONS = {
     "Supervised (Sınıflandırma)": {
         "Random Forest Sınıflandırıcı": RandomForestClassifier,
-        "Lojistik Regresyon": LogisticRegression
+        "Gradient Boosting Sınıflandırıcı": None
     },
     "Unsupervised (Anomali Tespiti)": {
         "Isolation Forest": IsolationForest,
-        "One-Class SVM": OneClassSVM # Daha stabil bir model için Kernel Explainer gerektirebilir
+        "One-Class SVM": None
     }
 }
 
-# --- Session State Başlatma ---
-if 'data_loaded' not in st.session_state:
-    st.session_state.data_loaded = False
-if 'model_trained' not in st.session_state:
-    st.session_state.model_trained = False
-if 'trained_model' not in st.session_state:
-    st.session_state.trained_model = None
-if 'feature_names' not in st.session_state:
-    st.session_state.feature_names = None
-if 'scaler' not in st.session_state:
-    st.session_state.scaler = None
-if 'target_encoder' not in st.session_state:
-    st.session_state.target_encoder = None
-if 'class_map' not in st.session_state:
-    st.session_state.class_map = None
+@st.cache_data
+def handle_uploaded_data(uploaded_file, skip_target=False):
+    """Yüklenen CSV dosyasını okur ve temel veri temizliğini yapar."""
+    try:
+        # Yorum satırlarını (# ile başlayanları) atlayarak oku
+        df = pd.read_csv(uploaded_file, comment='#')
+        
+        # Sadece sayısal ve kategorik veri türlerini tut, NaN olanları ortalama ile doldur (basit yaklaşım)
+        for col in df.columns:
+            if df[col].dtype == 'object':
+                # Eğer target sütunu değilse ve skip_target True ise, bu sütunu atla
+                if skip_target and col == st.session_state.target_column:
+                    continue
+                # Kategorik sütunları One-Hot Encoding için bırak
+                continue
+            
+            # Sayısal sütunlardaki eksik değerleri (NaN) ortalama ile doldur
+            if df[col].isnull().any():
+                df[col] = df[col].fillna(df[col].mean())
+        
+        return df
+    except Exception as e:
+        st.error(f"Veri yüklenirken hata oluştu: {e}")
+        return None
+
+def preprocess_data_and_train(df, model_class, target_column=None):
+    """Veriyi ön işler ve modeli eğitir."""
+    
+    # Kategori: One-Hot Encoding
+    X = pd.get_dummies(df.drop(columns=[target_column]) if target_column else df, drop_first=True)
+    
+    if target_column: # Supervised (Gözetimli)
+        y = df[target_column]
+        
+        # Etiket (Target) sütununu sayısal hale getir (Label Encoding)
+        le = LabelEncoder()
+        y_encoded = le.fit_transform(y)
+        st.session_state.le = le
+        st.session_state.feature_names = X.columns.tolist()
+
+        # Modeli Eğit
+        X_train, _, y_train, _ = train_test_split(X, y_encoded, test_size=0.2, random_state=42)
+        model = model_class(random_state=42, n_estimators=100)
+        model.fit(X_train, y_train)
+        
+        # Eğitim verilerini session state'e kaydet (SHAP için gerekli)
+        st.session_state.X_train = X_train
+        st.session_state.y_train = y_train
+        
+        return model, X_train.columns.tolist()
+    
+    else: # Unsupervised (Gözetimsiz)
+        
+        # Modeli Eğit (tüm veri ile)
+        model = model_class(random_state=42)
+        model.fit(X)
+        
+        st.session_state.X_train = X # SHAP için tüm X verisini kullan
+        st.session_state.feature_names = X.columns.tolist()
+        
+        return model, X.columns.tolist()
 
 
-# --- Yardımcı Fonksiyonlar ---
-
-def plot_shap_waterfall(explainer, shap_values, input_df, class_index, title):
+def plot_shap_waterfall(explainer, shap_values, input_df, class_index, title, prediction_label):
     """Tek bir örnek için SHAP Waterfall grafiği çizer."""
     
-    # SHAP Explanation objesi oluşturma (TreeExplainer, KernelExplainer vb. için uyumlu)
+    # SHAP Explanation objesi için değerleri ve beklenen değeri al
     if isinstance(shap_values, list):
+        # Sınıflandırma modelleri için: Sadece tahmin edilen sınıfa ait SHAP değerlerini kullan
         shap_values_to_plot = shap_values[class_index][0]
         base_value = explainer.expected_value[class_index]
     else:
-        # Unsupervised/Regresyon durumları için tek boyutlu değerler
+        # Anomali modelleri için: Tek bir çıktı vektörü vardır
         shap_values_to_plot = shap_values[0]
         base_value = explainer.expected_value
         
@@ -63,231 +122,224 @@ def plot_shap_waterfall(explainer, shap_values, input_df, class_index, title):
     )
     
     # Waterfall plot çizimi
-    # Matplotlib figürü oluşturulur ve Streamlit'e aktarılır.
     fig, ax = plt.subplots(figsize=(10, 6))
     shap.plots.waterfall(explanation, show=False)
-    ax.set_title(title, fontsize=14)
+    ax.set_title(f"'{prediction_label}' Tahminine Katkılar", fontsize=14)
     st.pyplot(fig)
     plt.close(fig)
 
-
 # --- UI Yapısı ---
-st.set_page_config(
-    page_title="Model Reveal - XAI Dashboard", 
-    layout="wide"
-)
 
 st.title("💡 Model Reveal: XAI Karar Mekanizması Analizi")
-st.markdown("Veri setinizi yükleyin, modelinizi eğitin ve tahminlerinin ardındaki nedenleri SHAP ile keşfedin.")
+st.markdown("İnteraktif bir Streamlit uygulamasıyla ML modelinizin neden o çıktıyı verdiğini keşfedin.")
 
-# --- SIDEBAR: Uygulama Ayarları ve Veri Yükleme ---
+# --- Sol Panel (Ayarlar ve Aşamalar) ---
 
-st.sidebar.header("1. Veri Setini Yükleyin (.csv)")
-uploaded_file = st.sidebar.file_uploader("Eğitim Verisi Yükle", type=["csv"])
+st.sidebar.header("Uygulama Akışı")
+st.sidebar.markdown(f"**Güncel Aşama:** `{st.session_state.stage}`")
+st.sidebar.markdown("---")
 
-if uploaded_file is not None and not st.session_state.data_loaded:
-    try:
-        data = pd.read_csv(uploaded_file)
-        st.session_state.original_data = data
-        st.session_state.data_loaded = True
-        st.sidebar.success("Veri başarıyla yüklendi!")
-    except Exception as e:
-        st.sidebar.error(f"Dosya yüklenirken hata oluştu: {e}")
 
-if st.session_state.data_loaded:
-    data = st.session_state.original_data
-    st.sidebar.subheader("2. Model Seçimi")
+# ===============================================
+# AŞAMA 1: EĞİTİM VERİSİ YÜKLE
+# ===============================================
+if st.session_state.stage == 'upload_train':
+    st.header("1. Eğitim Verisini Yükleyin (.csv)")
+    uploaded_train_file = st.file_uploader(
+        "Lütfen modelinizi eğitmek için .csv dosyanızı yükleyin (İlk 15 satırlık Kredi Riski verisini kullanabilirsiniz).", 
+        type="csv"
+    )
+    
+    if uploaded_train_file is not None:
+        train_df = handle_uploaded_data(uploaded_train_file)
+        if train_df is not None:
+            st.session_state.train_df = train_df
+            st.success("Eğitim verisi başarıyla yüklendi!")
+            st.dataframe(train_df.head(), use_container_width=True)
+            st.session_state.stage = 'select_model'
+            st.rerun() # Yeni aşamaya geç
+
+# ===============================================
+# AŞAMA 2: MODEL SEÇİMİ VE EĞİTİM
+# ===============================================
+if st.session_state.stage == 'select_model':
+    st.header("2. Model Seçimi ve Eğitimi")
     
     # Model Türü Seçimi
-    model_category = st.sidebar.selectbox(
+    model_category = st.selectbox(
         "Model Kategorisi",
-        list(MODEL_CHOICES.keys())
+        list(MODEL_OPTIONS.keys())
     )
     
-    # Spesifik Model Seçimi
-    selected_model_name = st.sidebar.selectbox(
-        "Spesifik Model",
-        list(MODEL_CHOICES[model_category].keys())
+    # Model Sınıfı Seçimi
+    model_name = st.selectbox(
+        "Model Sınıfı",
+        list(MODEL_OPTIONS[model_category].keys()),
+        disabled=(MODEL_OPTIONS[model_category].get(list(MODEL_OPTIONS[model_category].keys())[0]) is None) # Eğer model None ise pasif yap
     )
     
-    # Etiket (Target) Sütun Seçimi
+    st.session_state.model_type = model_category
+    st.session_state.model_class = MODEL_OPTIONS[model_category][model_name]
+    
     if model_category == "Supervised (Sınıflandırma)":
-        target_column = st.sidebar.selectbox(
-            "Etiket (Target) Sütunu Seçin",
-            data.columns
+        
+        # Etiket (Target) Sütunu Seçimi
+        target_column = st.selectbox(
+            "Etiket (Target) Sütununu Seçin",
+            st.session_state.train_df.columns
         )
-        st.sidebar.info("Supervised model seçtiğiniz için, veri setinizde Etiket Sütununun (Target) mevcut olması ve doğru seçilmesi ZORUNLUDUR.")
+        st.session_state.target_column = target_column
+
+        # Etiket kontrolü
+        if st.session_state.train_df[target_column].dtype not in ['int64', 'float64']:
+            st.info(f"Seçilen '{target_column}' sütunu metin içeriyor. Model eğitimi öncesinde Label Encoding uygulanacaktır.")
+        
+        # Özellikler kontrolü (Etiket hariç hepsi sayısal/kategorik olmalı)
+        feature_cols = st.session_state.train_df.drop(columns=[target_column]).columns
+        
+        st.info("Supervised model seçtiniz. Veri setinizde bir etiket (target) sütunu olmalıdır. Model eğitimi, kategori dönüşümü (One-Hot Encoding) yapılarak gerçekleştirilecektir.")
+        
     else:
-        target_column = None
-        st.sidebar.info("Unsupervised model seçtiniz. Veri setiniz etiket (target) içermemelidir.")
-        
-    # --- Model Eğitme Butonu ---
-    if st.sidebar.button("3. Modeli Eğit ve Hazırla", type="primary"):
-        # Veri Hazırlığı
-        if target_column:
-            # Supervised
+        st.info("Unsupervised model seçtiniz. Veri setinizde etiket (target) sütunu gerekli değildir. Model (Isolation Forest), verideki aykırı noktaları tespit etmek için eğitilecektir.")
+
+    if st.button(f"'{model_name}' Modelini Eğit", type="primary"):
+        with st.spinner("Model eğitiliyor ve veri önişleniyor..."):
             try:
-                # Sayısal olmayan sütunları hariç tut
-                X = data.drop(columns=[target_column]).select_dtypes(include=np.number)
-                y = data[target_column]
-                
-                # Etiketi sayısal hale getir (Label Encoding)
-                le = LabelEncoder()
-                y_encoded = le.fit_transform(y)
-                st.session_state.target_encoder = le
-                st.session_state.class_map = {i: label for i, label in enumerate(le.classes_)}
-
-                # Özellikleri ölçeklendir
-                scaler = StandardScaler()
-                X_scaled = pd.DataFrame(scaler.fit_transform(X), columns=X.columns)
-                st.session_state.scaler = scaler
-                st.session_state.feature_names = X.columns.tolist()
-                
-                # Modeli Eğit
-                ModelClass = MODEL_CHOICES[model_category][selected_model_name]
-                model_instance = ModelClass(random_state=42) if 'random_state' in ModelClass().get_params() else ModelClass()
-                model_instance.fit(X_scaled, y_encoded)
-                
-                st.session_state.trained_model = model_instance
-                st.session_state.model_trained = True
-                st.balloons()
-                st.sidebar.success(f"{selected_model_name} modeli başarıyla eğitildi ve hazır.")
-                
+                # Veri önişleme ve eğitim
+                st.session_state.model, feature_names = preprocess_data_and_train(
+                    st.session_state.train_df, 
+                    st.session_state.model_class, 
+                    st.session_state.target_column if model_category == "Supervised (Sınıflandırma)" else None
+                )
+                st.success(f"{model_name} başarıyla eğitildi!")
+                st.session_state.feature_names = feature_names
+                st.session_state.stage = 'upload_test'
+                st.rerun()
             except Exception as e:
-                st.sidebar.error(f"Supervised model eğitimi sırasında hata: {e}")
-                st.session_state.model_trained = False
+                st.error(f"Model eğitimi sırasında hata oluştu: {e}. Lütfen veri tiplerini kontrol edin.")
+
+# ===============================================
+# AŞAMA 3: TEST VERİSİ YÜKLEME VE TAHMİN
+# ===============================================
+if st.session_state.stage == 'upload_test':
+    st.header("3. Test Verisini Yükleyin (.csv)")
+    st.info(f"Eğitilen model: **{st.session_state.model_type}** | Yükleyeceğiniz veri, eğitim verisindeki sütunlarla ({len(st.session_state.feature_names)} özellik) uyumlu olmalıdır.")
+    
+    uploaded_test_file = st.file_uploader(
+        "Tahmin ve XAI analizi için tek bir örnek içeren test .csv dosyanızı yükleyin (Risk sütunu olmamalıdır).", 
+        type="csv"
+    )
+    
+    if uploaded_test_file is not None:
+        test_df = handle_uploaded_data(uploaded_test_file, skip_target=True)
+        if test_df is not None:
+            
+            # Test verisine eğitim verisine uygulanan dönüşümleri uygula (One-Hot Encoding)
+            test_X_raw = test_df.copy()
+            test_X_processed = pd.get_dummies(test_X_raw, drop_first=True).reindex(columns=st.session_state.feature_names, fill_value=0)
+            
+            if test_X_processed.shape[0] != 1:
+                st.warning("Test verisi sadece tek bir örnek (tek bir satır) içermelidir.")
+            else:
+                st.session_state.test_X = test_X_processed
+                st.session_state.test_X_raw = test_X_raw # SHAP'ta daha anlaşılır isimler için
+                st.session_state.stage = 'reveal_result'
+                st.rerun()
+
+# ===============================================
+# AŞAMA 4: SONUÇ VE XAI ANALİZİ
+# ===============================================
+if st.session_state.stage == 'reveal_result':
+    st.header("4. Model Reveal: Sonuç ve Nedenleri")
+    
+    test_X_processed = st.session_state.test_X
+    test_X_raw = st.session_state.test_X_raw
+    model = st.session_state.model
+    
+    # 1. Tahmin Yap
+    if st.session_state.model_type == "Supervised (Sınıflandırma)":
+        # Sınıflandırma Tahmini
+        prediction_value = model.predict(test_X_processed)[0]
+        prediction_label = st.session_state.le.inverse_transform([prediction_value])[0] # Orijinal etikete geri çevir
         
-        else:
-            # Unsupervised
-            try:
-                # Sayısal olmayan sütunları hariç tut ve etiket yok say
-                X = data.select_dtypes(include=np.number)
-                st.session_state.feature_names = X.columns.tolist()
-
-                # Özellikleri ölçeklendir
-                scaler = StandardScaler()
-                X_scaled = pd.DataFrame(scaler.fit_transform(X), columns=X.columns)
-                st.session_state.scaler = scaler
-                
-                # Modeli Eğit
-                ModelClass = MODEL_CHOICES[model_category][selected_model_name]
-                model_instance = ModelClass(random_state=42) if 'random_state' in ModelClass().get_params() else ModelClass()
-                model_instance.fit(X_scaled)
-                
-                st.session_state.trained_model = model_instance
-                st.session_state.model_trained = True
-                st.balloons()
-                st.sidebar.success(f"{selected_model_name} modeli başarıyla eğitildi ve hazır.")
-            except Exception as e:
-                st.sidebar.error(f"Unsupervised model eğitimi sırasında hata: {e}")
-                st.session_state.model_trained = False
-
-# --- Ana Gövde: Eğitim ve Test Aşamaları ---
-
-if not st.session_state.data_loaded:
-    st.info("Lütfen sol menüden (sidebar) eğitim veri setinizi yükleyerek başlayın.")
-    
-elif not st.session_state.model_trained:
-    st.warning("Veri yüklendi. Lütfen bir model seçin, Etiket Sütununu (Supervised için) belirleyin ve Modeli Eğit butonuna tıklayın.")
-
-elif st.session_state.model_trained:
-    st.success(f"Eğitim Başarılı! **{selected_model_name}** modeli teste hazır. ")
-
-    st.header("4. Test Verisi Yükle ve Açıklamayı Gör")
-    test_file = st.file_uploader("Test Verisi Yükle (Tek bir örnek içeren .csv önerilir)", type=["csv"])
-    
-    if test_file is not None:
-        try:
-            test_data = pd.read_csv(test_file)
+        proba = model.predict_proba(test_X_processed)[0]
+        confidence = max(proba) * 100
+        
+        # Tahmin ve Nedenleri Yan Yana Göster
+        col_tahmin, col_shap = st.columns([1, 2])
+        
+        with col_tahmin:
+            st.subheader("🎯 Tahmin Sonucu")
+            st.success(f"Sınıf: **{prediction_label}**")
+            st.metric(label="Güvenirlik", value=f"{confidence:.2f}%")
             
-            # Sadece eğitimde kullanılan sütunları al
-            test_data_X = test_data[st.session_state.feature_names]
+            st.markdown("---")
+            st.subheader("Girdi Değerleri")
+            st.dataframe(test_X_raw.T, use_container_width=True)
+
+
+        with col_shap:
+            st.subheader("📊 SHAP Açıklaması (Neden?)")
             
-            # Veriyi ölçeklendir
-            test_data_scaled = pd.DataFrame(
-                st.session_state.scaler.transform(test_data_X), 
-                columns=st.session_state.feature_names
+            # SHAP Explainer oluştur ve hesapla
+            explainer = shap.TreeExplainer(model)
+            shap_values = explainer.shap_values(test_X_processed)
+            
+            # SHAP'ı sadece tahmin edilen sınıf için görselleştir
+            plot_shap_waterfall(
+                explainer, 
+                shap_values, 
+                test_X_processed, # OHE'li veriyi kullan
+                prediction_value, 
+                f"'{prediction_label}' Tahminine Katkılar",
+                prediction_label
             )
-            
-            # --- Tahmin Yap ve SHAP'ı Hesapla ---
-            model = st.session_state.trained_model
-            
-            # SHAP sadece ilk satırı açıklar (tek örnek testi için)
-            sample_to_explain = test_data_scaled.iloc[[0]]
-            original_input = test_data_X.iloc[[0]]
-            
-            # 1. Tahmin Yap
-            prediction_value = model.predict(sample_to_explain)[0]
-            
-            # 2. SHAP Açıklaması
-            try:
-                explainer = shap.TreeExplainer(model)
-                shap_values = explainer.shap_values(sample_to_explain)
-            except Exception:
-                # TreeExplainer desteklemeyen modeller için (örn. Lojistik Regresyon, OneClassSVM) Kernel Explainer dene.
-                # Kernel Explainer yavaştır, bu yüzden sadece gerektiğinde kullanılır.
-                st.warning("TreeExplainer desteklenmiyor. Kernel Explainer kullanılıyor. Bu işlem biraz zaman alabilir.")
-                # SHAP için bir 'arka plan' verisi (eğitim setinden örnek) gereklidir.
-                background = st.session_state.original_data.sample(100, random_state=42).select_dtypes(include=np.number)
-                background_scaled = st.session_state.scaler.transform(background)
-                explainer = shap.KernelExplainer(model.predict, background_scaled)
-                shap_values = explainer.shap_values(sample_to_explain)
-            
-            # --- Sonuçları Göster ---
-            
-            col_tahmin, col_shap = st.columns([1, 2])
-            
-            with col_tahmin:
-                st.subheader("🎯 Tahmin Sonucu")
-                if isinstance(model, (RandomForestClassifier, LogisticRegression)):
-                    # Supervised Sınıflandırma
-                    prediction_label = st.session_state.class_map[prediction_value]
-                    st.success(f"Sınıf: **{prediction_label}**")
-                    
-                    if hasattr(model, 'predict_proba'):
-                        proba = model.predict_proba(sample_to_explain)[0]
-                        confidence = max(proba) * 100
-                        st.metric(label="Güvenirlik", value=f"{confidence:.2f}%")
+            st.caption("Grafik, tahminin temel ortalama çıktıdan nasıl saptığını ve hangi özelliklerin (OHE'li) bu sapmaya ne kadar katkı sağladığını gösterir.")
 
-                    plot_shap_waterfall(
-                        explainer, 
-                        shap_values, 
-                        original_input, 
-                        prediction_value, 
-                        f"'{prediction_label}' Tahminine Katkılar"
-                    )
+    else: # Unsupervised (Anomali Tespiti)
+        # Anomali Tespiti Tahmini
+        prediction_value = model.predict(test_X_processed)[0] # -1 veya 1
+        prediction_label = "Anomali (Aykırı Değer)" if prediction_value == -1 else "Normal"
+        
+        # Anomali skorunu al (daha düşük skor = daha yüksek anomali)
+        anomaly_score = model.decision_function(test_X_processed)[0]
+        
+        col_tahmin, col_shap = st.columns([1, 2])
 
-                elif isinstance(model, (IsolationForest, OneClassSVM)):
-                    # Unsupervised Anomali Tespiti
-                    prediction_label = {-1: 'Anomali (Aykırı Değer)', 1: 'Normal'}[prediction_value]
-                    anomaly_score = model.decision_function(sample_to_explain)[0]
-                    
-                    if prediction_value == -1:
-                        st.error(f"Tespit: **{prediction_label}**")
-                    else:
-                        st.info(f"Tespit: **{prediction_label}**")
-                        
-                    st.metric(label="Anomali Skoru", value=f"{anomaly_score:.4f}", delta=f"{-anomaly_score:.4f} (Normalden Uzaklık)", delta_color="inverse")
-                    
-                    # Isolation Forest için SHAP görselleştirmesi
-                    plot_shap_waterfall(
-                        explainer, 
-                        shap_values, 
-                        original_input, 
-                        0, 
-                        f"'{prediction_label}' Tespitine Özellik Katkıları"
-                    )
+        with col_tahmin:
+            st.subheader("🎯 Tespit Sonucu")
+            if prediction_value == -1:
+                st.error(f"Tespit: **{prediction_label}**")
+            else:
+                st.success(f"Tespit: **{prediction_label}**")
+            st.metric(label="Anomali Skoru", value=f"{anomaly_score:.4f}", delta=f"{'Daha Düşük = Daha Anormal' if anomaly_score < 0 else 'Daha Yüksek = Daha Normal'}")
             
-            with col_shap:
-                st.subheader("📊 SHAP Açıklaması (Neden?)")
-                st.markdown("**Bu Örnek İçin Girdi Değerleri:**")
-                st.dataframe(original_input.T, use_container_width=True)
-                st.markdown("---")
-                st.markdown("Grafik, modelin temel ortalama çıktıdan (Base Value) nasıl saptığını ve hangi özelliklerin bu sapmaya ne kadar katkı sağladığını gösterir.")
+            st.markdown("---")
+            st.subheader("Girdi Değerleri")
+            st.dataframe(test_X_raw.T, use_container_width=True)
 
-        except Exception as e:
-            st.error(f"Test verisi veya açıklama oluşturulurken hata oluştu: {e}")
-            st.warning("Lütfen test dosyanızın, eğitim dosyanızla aynı sütunlara (etiket hariç) sahip olduğundan emin olun.")
 
-st.markdown("---")
-st.markdown("💡 Model Reveal – XAI Dashboard | SHAP & Streamlit Entegrasyonu")
+        with col_shap:
+            st.subheader("📊 SHAP Açıklaması (Neden?)")
+
+            # SHAP Explainer oluştur ve hesapla
+            explainer = shap.TreeExplainer(model)
+            # Isolation Forest genellikle sadece tek bir çıktı değeri döndürür.
+            shap_values = explainer.shap_values(test_X_processed) 
+            
+            plot_shap_waterfall(
+                explainer, 
+                np.array([shap_values]), # SHAP'a tek bir değer gibi sunmak için
+                test_X_processed, 
+                0, # Index önemsiz
+                f"'{prediction_label}' Kararına Katkılar",
+                prediction_label
+            )
+            st.caption("Grafik, örneğin neden anormal (negatif sapma) veya normal (pozitif sapma) olarak sınıflandırıldığına dair özellik katkılarını gösterir.")
+
+    if st.button('Yeni Analiz Başlat', type="secondary"):
+        st.session_state.stage = 'upload_train'
+        st.session_state.model = None
+        st.session_state.test_X = None
+        st.session_state.le = None
+        st.rerun()
